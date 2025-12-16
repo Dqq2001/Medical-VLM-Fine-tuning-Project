@@ -21,23 +21,30 @@
 └── lora_model/         # (自动生成) 微调后的 LoRA 权重
 ```
 
-## 🛠️ 环境安装
+## 🛠️ 准备工作
 
-1.  **克隆项目**
-    ```bash
-    git clone https://github.com/your-username/medical-vlm-finetune.git
-    cd medical-vlm-finetune
-    ```
+### 1. 环境安装
+建议使用 Conda 创建虚拟环境：
+```bash
+conda create -n vlm python=3.10
+conda activate vlm
+pip install -r requirements.txt
+```
+*注意：Unsloth 的安装可能需要特定的 CUDA 版本，请参考 [Unsloth 官方文档](https://github.com/unslothai/unsloth) 进行适配。*
 
-2.  **安装依赖**
-    建议使用 Conda 创建虚拟环境：
-    ```bash
-    conda create -n vlm python=3.10
-    conda activate vlm
-    pip install -r requirements.txt
-    ```
+### 2. 下载基础模型
+本项目使用 [Qwen3-VL-8B-Instruct-bnb-4bit](https://www.modelscope.cn/models/unsloth/Qwen3-VL-8B-Instruct-bnb-4bit) 作为基座模型。你可以使用 modelscope CLI 进行下载：
 
-    *注意：Unsloth 的安装可能需要特定的 CUDA 版本，请参考 [Unsloth 官方文档](https://github.com/unslothai/unsloth) 进行适配。*
+```bash
+# 安装 modelscope
+pip install modelscope
+
+# 下载模型到本地 models 目录
+modelscope download --model unsloth/Qwen3-VL-8B-Instruct-bnb-4bit --local_dir models/unsloth/Qwen3-VL-8B-Instruct-bnb-4bit
+```
+
+### 3. 准备数据集
+本项目使用 [Radiology-mini](https://huggingface.co/datasets/open-data/Radiology-mini) 数据集进行演示。请前往 Hugging Face 下载并将数据解压到 `data/` 目录中。
 
 ## 🏃‍♂️ 快速开始
 
