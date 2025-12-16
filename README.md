@@ -61,11 +61,7 @@ streamlit run app.py
 ![alt text](image.png)
 ![alt text](image-1.png)
 
-## 🤝 致谢
 
-- [Unsloth](https://github.com/unslothai/unsloth): 提供超快的 LLM/VLM 微调库。
-- [Qwen2-VL](https://github.com/QwenLM/Qwen2-VL): 强大的视觉语言基座模型。
-- [Streamlit](https://streamlit.io/): 快速构建数据应用的 Python 框架。
 
 ## 📜 许可证
 
