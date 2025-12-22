@@ -1,0 +1,257 @@
+# train_grpo.py - Medical VLM Reinforcement Learning (GRPO) Script
+# 
+# 🏥 医疗视觉大模型强化学习脚本 (GRPO)
+# 基于 Unsloth 和 Qwen3-VL
+#
+# 功能：
+# 1. 加载 SFT 后的模型作为初始策略
+# 2. 定义奖励函数 (Reward Functions)：
+#    - XML 格式奖励：强制模型使用 <reasoning>...</reasoning> <answer>...</answer> 格式
+#    - 长度奖励：鼓励更详细的推理过程
+# 3. 执行 GRPO 训练：让模型学会“先思考，再回答”
+# 4. 保存 RL 后的模型权重
+
+import os
+import re
+import torch
+from unsloth import FastVisionModel, is_bf16_supported
+from trl import GRPOTrainer, GRPOConfig
+from datasets import load_dataset
+from transformers import AutoTokenizer
+
+def main():
+    print("🚀 Starting Medical VLM GRPO Training...")
+
+    # =================================================================
+    # 1. 配置与模型加载
+    # =================================================================
+    # 直接加载 SFT 后的 LoRA 模型作为起点
+    # 如果 lora_model 存在，直接加载它；否则加载基座
+    if os.path.exists("lora_model"):
+        print(f"📦 Loading SFT model from: lora_model")
+        MODEL_NAME = "lora_model" # Unsloth 支持直接加载 LoRA 目录
+    else:
+        MODEL_NAME = "/root/autodl-tmp/models/unsloth/Qwen3-VL-8B-Instruct-bnb-4bit"
+        print(f"⚠️ 'lora_model' not found! Using base model: {MODEL_NAME}")
+
+    OUTPUT_DIR = "outputs_grpo"
+
+    # 加载模型
+    model, tokenizer = FastVisionModel.from_pretrained(
+        model_name=MODEL_NAME,
+        load_in_4bit=True,
+        device_map="auto",
+        use_gradient_checkpointing="unsloth",
+        local_files_only=True,
+    )
+    
+    # 配置 LoRA (GRPO 也需要 LoRA 来节省显存)
+    print("⚙️ Configuring LoRA for GRPO...")
+    
+    # 检查模型是否已经加载了 Adapter (从 lora_model 加载时会自动带上)
+    # 如果已经有 adapter，我们只需要确保它处于训练模式
+    if hasattr(model, "peft_config") and len(model.peft_config) > 0:
+        print("✅ Model already has LoRA adapters. Enabling training mode...")
+        FastVisionModel.for_training(model)
+    else:
+        # 只有当模型是纯基座时，才需要添加新的 LoRA
+        print("🆕 Adding new LoRA adapters...")
+        model = FastVisionModel.get_peft_model(
+            model,
+            finetune_vision_layers=False,
+            finetune_language_layers=True,
+            finetune_attention_modules=True,
+            finetune_mlp_modules=True,
+            r=16,
+            lora_alpha=16,
+            lora_dropout=0,
+            bias="none",
+            use_rslora=False,
+        )
+
+    # =================================================================
+    # 2. 准备数据集与 Prompt 格式
+    # =================================================================
+    print(" Loading dataset...")
+    # 这里我们复用 Radiology-mini 数据集，但我们需要构造不带 Answer 的 Prompt
+    # 让模型自己生成推理过程和答案，然后通过奖励函数来评估
+    dataset = load_dataset("./data", split="train")
+
+    # 定义系统提示词，强制要求特定的输出格式
+    SYSTEM_PROMPT = """
+    你是一名专业的放射科医生。请分析给定的医疗图像。
+    请严格按照以下格式输出你的诊断结果：
+    
+    <reasoning>
+    在这里写下你的观察过程、推理逻辑和分析细节。
+    例如：观察到了什么异常密度？边缘是否清晰？位置在哪里？
+    </reasoning>
+    
+    <answer>
+    在这里给出最终的诊断结论。
+    </answer>
+    """
+
+    # GRPO 需要的数据格式通常是 prompt 列
+    def format_data(sample):
+        # 构造输入 Prompt
+        messages = [
+            {
+                "role": "system", 
+                "content": [{"type": "text", "text": SYSTEM_PROMPT}]
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": sample['image']},
+                    {"type": "text", "text": "请分析这张图片。"}
+                ]
+            }
+        ]
+        return {
+            "prompt": messages,
+            "ground_truth": sample['caption'] # 1) 改名 target -> ground_truth
+        }
+
+    # 1) 改名 target -> ground_truth, 并增加 num_proc=4 加速
+    dataset = dataset.map(format_data, remove_columns=["image", "caption", "image_id", "cui"], num_proc=4)
+
+    # =================================================================
+    # 3. 定义奖励函数 (Reward Functions)
+    # =================================================================
+    print("⚖️ Defining Reward Functions...")
+
+    # 1. 格式奖励：检查是否包含 XML 标签 
+    def xml_format_reward(completions, **kwargs):
+        rewards = []
+        pattern = r"<reasoning>.*?</reasoning>\s*<answer>.*?</answer>"
+        for completion in completions:
+            text = completion[0]["content"] if isinstance(completion, list) else completion
+            match = re.search(pattern, text, re.DOTALL)
+            rewards.append(0.5 if match else 0.0) # 降低权重，从 1.0 降到 0.5
+        return rewards
+
+    # 2. 长度惩罚 (Length Penalty)：防止模型无意义堆砌字数 
+    # 目标是控制冗余，超过目标长度才扣分
+    def length_penalty_reward(completions, **kwargs):
+        rewards = []
+        target_length = 500 # 假设我们期望的推理长度在 500 字符左右
+        for completion in completions:
+            text = completion[0]["content"] if isinstance(completion, list) else completion
+            reasoning_match = re.search(r"<reasoning>(.*?)</reasoning>", text, re.DOTALL)
+            if reasoning_match:
+                reasoning_text = reasoning_match.group(1)
+                length = len(reasoning_text)
+                # 如果长度超过 target_length，每超 10 个字符扣 0.01 分
+                penalty = max(0, (length - target_length) / 10.0 * 0.01)
+                rewards.append(-penalty)
+            else:
+                rewards.append(0.0)
+        return rewards
+    
+    # 3. 步骤奖励 (Step Reward)：鼓励结构化推理 (新增)
+    def step_reward(completions, **kwargs):
+        rewards = []
+        # 检测 "1.", "Step 1", "首先", "第一" 等步骤词
+        step_patterns = [r"\d+\.", r"Step \d+", r"首先", r"其次", r"最后", r"第一", r"第二"]
+        for completion in completions:
+            text = completion[0]["content"] if isinstance(completion, list) else completion
+            reasoning_match = re.search(r"<reasoning>(.*?)</reasoning>", text, re.DOTALL)
+            if reasoning_match:
+                reasoning_text = reasoning_match.group(1)
+                step_count = 0
+                for p in step_patterns:
+                    step_count += len(re.findall(p, reasoning_text))
+                # 每个步骤加 0.1 分，上限 0.5 分
+                rewards.append(min(step_count * 0.1, 0.5))
+            else:
+                rewards.append(0.0)
+        return rewards
+
+    # 4. 准确率奖励 (Accuracy)：主目标 (改进版 - 实体关键词覆盖率)
+    # 1) 签名修改：target -> ground_truth, 兼容 **kwargs
+    def accuracy_reward(completions, ground_truth, **kwargs):
+        rewards = []
+        for completion, ref_answer in zip(completions, ground_truth):
+            text = completion[0]["content"] if isinstance(completion, list) else completion
+            answer_match = re.search(r"<answer>(.*?)</answer>", text, re.DOTALL)
+            if answer_match:
+                pred_answer = answer_match.group(1).lower()
+                
+                # 简单的实体抽取逻辑 (实际可用 spaCy 或医学实体库)
+                # 这里我们假设参考答案中的名词/形容词是关键实体
+                # 简单起见，我们按空格分词，并过滤掉停用词
+                stop_words = {"the", "is", "a", "an", "of", "in", "on", "at", "and", "with", "to", "for"}
+                ref_tokens = set([w for w in ref_answer.lower().split() if w not in stop_words and len(w) > 2])
+                pred_tokens = set([w for w in pred_answer.split() if w not in stop_words and len(w) > 2])
+                
+                if not ref_tokens:
+                    rewards.append(0.0)
+                    continue
+                
+                # 计算 Recall (覆盖率) 作为准确率的核心指标
+                # 医疗场景下，漏诊 (False Negative) 代价大，所以关注 Recall
+                intersection = ref_tokens.intersection(pred_tokens)
+                recall = len(intersection) / len(ref_tokens)
+                
+                # 给予较高的权重 (例如 2.0)，使其成为主导奖励
+                rewards.append(recall * 2.0)
+            else:
+                rewards.append(0.0)
+        return rewards
+
+    # =================================================================
+    # 4. 执行 GRPO 训练
+    # =================================================================
+    print(" Starting GRPO training...")
+    
+    training_args = GRPOConfig(
+        output_dir=OUTPUT_DIR,
+        run_name="grpo_medical_vlm",
+        learning_rate=5e-6,          # RL 通常需要更低的学习率 (MD 建议 1e-6 ~ 1e-5)
+        adam_beta1=0.9,
+        adam_beta2=0.99,
+        weight_decay=0.1,
+        warmup_ratio=0.1,
+        lr_scheduler_type="cosine",
+        logging_steps=1,
+        per_device_train_batch_size=1,
+        gradient_accumulation_steps=4,
+        num_generations=4,           # 每个 prompt 生成多少个样本用于对比 (Group Size)
+        max_prompt_length=512,
+        max_completion_length=512,   # 允许生成的最大长度
+        max_steps=50,                # 演示用
+        save_steps=10,
+        report_to="none",
+        use_vllm=False,              # 如果显存够大且安装了 vLLM 可以开启加速
+        bf16=is_bf16_supported(),
+        
+        # 1) 训练目标与“参考策略 + KL 约束”
+        # GRPO 的核心稳定器配置
+        beta=0.04,                   # KL coefficient (trl 中通常叫 beta)，MD 建议 0.01-0.1
+        # clip_range=0.2,            # TRL 的 GRPOConfig 可能不直接暴露 clip_range，通常内置处理或默认值
+        # temperature=0.8,           # 生成采样温度，影响探索多样性
+    )
+
+    trainer = GRPOTrainer(
+        model=model,
+        processing_class=tokenizer,
+        reward_funcs=[xml_format_reward, length_penalty_reward, step_reward, accuracy_reward],
+        args=training_args,
+        train_dataset=dataset,
+    )
+
+    trainer.train()
+    print(" GRPO Training completed.")
+
+    # =================================================================
+    # 5. 保存模型
+    # =================================================================
+    GRPO_OUTPUT_DIR = "grpo_model"
+    print(f" Saving GRPO model to '{GRPO_OUTPUT_DIR}'...")
+    model.save_pretrained(GRPO_OUTPUT_DIR)
+    tokenizer.save_pretrained(GRPO_OUTPUT_DIR)
+    print(" Model saved successfully!")
+
+if __name__ == "__main__":
+    main()

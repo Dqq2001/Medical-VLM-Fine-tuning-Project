@@ -49,17 +49,37 @@ st.markdown("Upload a medical image and ask questions to the AI radiologist.")
 
 # Load Model (Cached) with improved status display
 @st.cache_resource
-def load_model():
-    model_path = "/root/autodl-tmp/lora_model"
+def load_model(model_selection="SFT (LoRA)"):
+    # Determine model path based on selection
+    if model_selection == "SFT (LoRA)":
+        model_path = "/root/autodl-tmp/lora_model"
+        base_model_path = "/root/autodl-tmp/models/unsloth/Qwen3-VL-8B-Instruct-bnb-4bit"
+    elif model_selection == "GRPO (RL)":
+        model_path = "/root/autodl-tmp/grpo_model"
+        base_model_path = "/root/autodl-tmp/models/unsloth/Qwen3-VL-8B-Instruct-bnb-4bit"
+    else:
+        return None, None
+
     try:
+        # Load model with specific adapter
+        # Unsloth's from_pretrained can handle both base+adapter loading if path points to adapter
+        # But to be safe and support switching, we might want to load base then adapter
+        # However, for efficiency in Streamlit (caching), we'll let FastVisionModel handle it
+        
+        # Check if the specific model path exists
+        if not os.path.exists(model_path):
+            st.error(f"❌ Model path not found: {model_path}")
+            return None, None
+
         model, tokenizer = FastVisionModel.from_pretrained(
-            model_name=model_path,
+            model_name=model_path, # This loads base + adapter if it's a PEFT model
             load_in_4bit=True,
             local_files_only=True,
         )
         FastVisionModel.for_inference(model)
         return model, tokenizer
     except Exception as e:
+        st.error(f"Error loading model: {e}")
         return None, None
 
 # Initialize Session State
@@ -68,6 +88,42 @@ if "messages" not in st.session_state:
 
 if "uploaded_image" not in st.session_state:
     st.session_state.uploaded_image = None
+
+# Sidebar for Image Upload and Controls
+with st.sidebar:
+    st.header("🖼️ Image Upload")
+    
+    # Model Selection
+    st.subheader("🤖 Model Selection")
+    model_option = st.selectbox(
+        "Choose Model Version:",
+        ("SFT (LoRA)", "GRPO (RL)"),
+        help="SFT: Base fine-tuned model. GRPO: Reinforcement learning optimized for reasoning."
+    )
+    
+    # Reload model if selection changes
+    if "current_model" not in st.session_state or st.session_state.current_model != model_option:
+        st.session_state.current_model = model_option
+        # Clear cached model to force reload (optional, but streamlit cache handles args)
+        # st.cache_resource.clear() 
+    
+    uploaded_file = st.file_uploader("Upload Medical Image", type=["jpg", "jpeg", "png"])
+    
+    st.divider()
+    
+    st.header("⚙️ Controls")
+    if st.button("🗑️ Clear Conversation", use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
+
+    st.markdown("---")
+    st.markdown("### Model Info")
+    st.caption(f"Model: Qwen3-VL-8B ({model_option})")
+    st.caption("Task: Medical Image Analysis")
+
+# Main Area
+st.title("🏥 Medical Assistant")
+st.markdown("Upload a medical image and ask questions to the AI radiologist.")
 
 # Handle Image Upload
 if uploaded_file:
@@ -84,15 +140,14 @@ if uploaded_file:
         st.image(image, use_container_width=True)
 
 # Load the model
-with st.status("🚀 Loading Medical VLM...", expanded=True) as status:
+with st.status(f"🚀 Loading {model_option} Model...", expanded=True) as status:
     st.write("Initializing model architecture...")
-    model, tokenizer = load_model()
+    model, tokenizer = load_model(model_option)
     
     if model:
-        status.update(label="✅ Model Loaded Successfully!", state="complete", expanded=False)
+        status.update(label=f"✅ {model_option} Model Loaded Successfully!", state="complete", expanded=False)
     else:
         status.update(label="❌ Model Loading Failed", state="error")
-        st.error("Failed to load model. Please check logs.")
         st.stop()
 
 

@@ -13,7 +13,8 @@
 
 ```
 .
-├── train.py            # 微调脚本 (Python 版本)
+├── train.py            # 微调脚本 (SFT)
+├── train_grpo.py       # 强化学习脚本 (GRPO)
 ├── app.py              # Streamlit 可视化部署应用
 ├── requirements.txt    # 项目依赖文件
 ├── README.md           # 项目说明文档
@@ -50,14 +51,21 @@ modelscope download --model unsloth/Qwen3-VL-8B-Instruct-bnb-4bit --local_dir mo
 
 ### 1. 模型微调
 
-#### 使用 Python 脚本
-直接运行以下命令进行训练：
+#### 方式二：使用 Python 脚本 (SFT)
+直接运行以下命令进行监督微调：
 ```bash
 python train.py
 ```
 训练过程会自动加载模型、处理数据、微调并保存权重到 `lora_model/` 目录。
 
-### 2. 启动 Web 应用
+### 2. 强化学习 (GRPO)
+在完成 SFT 后，可以使用 GRPO 进一步提升模型的推理能力：
+```bash
+python train_grpo.py
+```
+训练后的模型将保存到 `grpo_model/` 目录。
+
+### 3. 启动 Web 应用
 训练完成后，使用 Streamlit 启动可视化界面：
 ```bash
 streamlit run app.py
