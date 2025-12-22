@@ -27,34 +27,25 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-
-# Main Area
-st.title("🏥 Medical Assistant")
-st.markdown("Upload a medical image and ask questions to the AI radiologist.")
-
 # Load Model (Cached) with improved status display
 @st.cache_resource
 def load_model(model_selection="SFT (LoRA)"):
     # Determine model path based on selection
     if model_selection == "SFT (LoRA)":
         model_path = "/root/autodl-tmp/lora_model"
-        base_model_path = "/root/autodl-tmp/models/unsloth/Qwen3-VL-8B-Instruct-bnb-4bit"
     elif model_selection == "GRPO (RL)":
         model_path = "/root/autodl-tmp/grpo_model"
-        base_model_path = "/root/autodl-tmp/models/unsloth/Qwen3-VL-8B-Instruct-bnb-4bit"
     else:
         return None, None
 
     try:
-        # Load model with specific adapter
-        # Unsloth's from_pretrained can handle both base+adapter loading if path points to adapter
-        # But to be safe and support switching, we might want to load base then adapter
-        # However, for efficiency in Streamlit (caching), we'll let FastVisionModel handle it
-        
         # Check if the specific model path exists
         if not os.path.exists(model_path):
             st.error(f"❌ Model path not found: {model_path}")
             return None, None
+
+        # Clean up GPU memory before loading new model
+        torch.cuda.empty_cache()
 
         model, tokenizer = FastVisionModel.from_pretrained(
             model_name=model_path, # This loads base + adapter if it's a PEFT model
@@ -89,8 +80,8 @@ with st.sidebar:
     # Reload model if selection changes
     if "current_model" not in st.session_state or st.session_state.current_model != model_option:
         st.session_state.current_model = model_option
-        # Clear cached model to force reload (optional, but streamlit cache handles args)
-        # st.cache_resource.clear() 
+        # Clear cached model to force reload
+        st.cache_resource.clear() 
     
     uploaded_file = st.file_uploader("Upload Medical Image", type=["jpg", "jpeg", "png"], key="sidebar_uploader")
     
@@ -173,7 +164,6 @@ if prompt := st.chat_input("Ask about the image (e.g., 'Describe the pathology')
                 
                 # Add a system message to encourage detailed responses
                 system_prompt = "你是一名专业的放射科医生。请详细描述你在图片中看到的内容，包括病变的位置、形态特征以及可能的诊断依据。请避免简短的回答，尽可能提供详尽的分析。"
-                # model_messages.append({"role": "system", "content": [{"type": "text", "text": system_prompt}]})
                 
                 image_included = False
                 
@@ -209,9 +199,7 @@ if prompt := st.chat_input("Ask about the image (e.g., 'Describe the pathology')
                     input_text,
                     add_special_tokens=False,
                     return_tensors="pt",
-                    # Fix for "Mismatch in image token count": Disable truncation or increase max_length
-                    truncation=False, 
-                    # max_length=4096 # Optional: Set a safe upper limit if needed
+                    truncation=False, # Disable truncation to prevent image token mismatch
                 ).to("cuda")
                 
                 # Streamer setup
