@@ -119,33 +119,48 @@ def main():
     # =================================================================
     print("⚖️ Defining Reward Functions...")
 
-    # 1. 格式奖励：检查是否包含 XML 标签 
+    # 1. 格式奖励：检查是否包含 XML 标签，且内容充实
     def xml_format_reward(completions, **kwargs):
         rewards = []
-        pattern = r"<reasoning>.*?</reasoning>\s*<answer>.*?</answer>"
+        pattern = r"<reasoning>.*?</reasoning>\s*<answer>(.*?)</answer>"
         for completion in completions:
             text = completion[0]["content"] if isinstance(completion, list) else completion
             match = re.search(pattern, text, re.DOTALL)
-            rewards.append(0.5 if match else 0.0) # 降低权重，从 1.0 降到 0.5
+            
+            if match:
+                # 检查 <answer> 内容长度
+                answer_content = match.group(1).strip()
+                if len(answer_content) > 10: # 至少有 10 个字符
+                    rewards.append(1.0)
+                else:
+                    rewards.append(0.5) # 格式对但内容太短
+            else:
+                rewards.append(0.0)
         return rewards
 
-    # 2. 长度惩罚 (Length Penalty)：防止模型无意义堆砌字数 
-    # 目标是控制冗余，超过目标长度才扣分
-    def length_penalty_reward(completions, **kwargs):
+    # 2. 长度奖励 (Length Reward)：鼓励适中长度的推理
+    # 分段/门槛式设计，严厉打击过短回复
+    def length_reward(completions, **kwargs):
         rewards = []
-        target_length = 300 # 降低目标长度，鼓励简洁
+        min_len = 80
+        max_len = 250
         for completion in completions:
             text = completion[0]["content"] if isinstance(completion, list) else completion
             reasoning_match = re.search(r"<reasoning>(.*?)</reasoning>", text, re.DOTALL)
             if reasoning_match:
                 reasoning_text = reasoning_match.group(1)
                 length = len(reasoning_text)
-                # 软惩罚：超过 target_length 后，惩罚力度稍微加大，但不要太狠，避免模型不敢说话
-                if length > target_length:
-                     penalty = (length - target_length) / 50.0 * 0.1 # 每超50字扣0.1分
-                     rewards.append(-min(penalty, 1.0)) # 最多扣1分
-                else:
-                     rewards.append(0.0)
+                
+                # 分段奖励逻辑
+                if length < min_len:
+                    # 严厉惩罚过短回复 (如 19 tokens)
+                    rewards.append(-0.5)
+                elif min_len <= length <= max_len:
+                    # 舒适区给正奖励
+                    rewards.append(0.5)
+                else: # length > max_len
+                    # 超过上限给轻微负分，防止废话
+                    rewards.append(-0.1)
             else:
                 rewards.append(0.0)
         return rewards
@@ -195,29 +210,32 @@ def main():
             ref_tokens = set([w for w in ref_clean.split() if w not in stop_words and len(w) > 2])
             pred_tokens = set([w for w in pred_clean.split() if w not in stop_words and len(w) > 2])
             
-            if not ref_tokens:
-                rewards.append(0.5) # 如果参考答案为空或全是停用词，给个中间分
-                continue
-            
-            # 计算 Recall (覆盖率)
+            # 只要有任何重叠就给基础分，避免全0
             intersection = ref_tokens.intersection(pred_tokens)
-            recall = len(intersection) / len(ref_tokens)
             
-            # 奖励设计：
-            # 1. 基础分：只要有重叠就给分
-            # 2. 阶梯奖励：覆盖率越高，奖励指数级上升
-            if recall == 0:
-                score = 0.0
-            elif recall < 0.3:
-                score = 0.5
-            elif recall < 0.6:
-                score = 1.0
-            elif recall < 0.9:
-                score = 1.5
+            if not ref_tokens:
+                 # 参考答案无效时，给一个中间分保底
+                 rewards.append(0.5)
+                 continue
+
+            if not intersection:
+                 rewards.append(0.0)
             else:
-                score = 2.0
-                
-            rewards.append(score)
+                 # 计算覆盖率
+                 recall = len(intersection) / len(ref_tokens)
+                 
+                 # 阶梯奖励设计：更密集的阶梯，确保有分可得
+                 if recall >= 0.9:
+                     score = 2.0
+                 elif recall >= 0.6:
+                     score = 1.5
+                 elif recall >= 0.3:
+                     score = 1.0
+                 else:
+                     # 只要有命中 (0 < recall < 0.3)，就给 0.5 分
+                     score = 0.5
+                     
+                 rewards.append(score)
         return rewards
 
     # =================================================================
@@ -256,7 +274,7 @@ def main():
     trainer = GRPOTrainer(
         model=model,
         processing_class=tokenizer,
-        reward_funcs=[xml_format_reward, length_penalty_reward, step_reward, accuracy_reward],
+        reward_funcs=[xml_format_reward, length_reward, step_reward, accuracy_reward],
         args=training_args,
         train_dataset=dataset,
     )
