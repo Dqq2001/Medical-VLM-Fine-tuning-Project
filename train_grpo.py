@@ -32,8 +32,8 @@ MODEL_CANDIDATES = [
 
 DATASET_PATH = "./data"
 OUTPUT_DIR = "outputs_grpo" # 恢复为原来的 outputs_grpo
-MAX_PROMPT_LENGTH = 1024  # 增加长度以容纳图像 tokens
-MAX_COMPLETION_LENGTH = 512
+MAX_PROMPT_LENGTH = 1024
+MAX_COMPLETION_LENGTH = 1024  # 从 512 增加到 1024，防止 CoT 被截断
 
 def get_model_path():
     for path in MODEL_CANDIDATES:
@@ -232,7 +232,7 @@ Write your final diagnostic conclusion here.
         num_generations=4,            # Group Size (G)
         max_prompt_length=MAX_PROMPT_LENGTH,
         max_completion_length=MAX_COMPLETION_LENGTH,
-        max_steps=50,                 # 训练步数
+        max_steps=10,                 # 训练步数
         save_steps=25,
         save_total_limit=2,
         report_to="none",             # 关闭 wandb 除非配置了
