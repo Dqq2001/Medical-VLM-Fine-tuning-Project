@@ -1,6 +1,6 @@
-# train_grpo_v2.py - Improved Medical VLM Reinforcement Learning (GRPO) Script
+# train_grpo.py - Improved Medical VLM Reinforcement Learning (GRPO) Script
 # 
-# 🏥 医疗视觉大模型强化学习脚本 (GRPO)
+# 🏥 医疗视觉大模型强化学习脚本 (GRPO) 
 #
 #
 # 功能：
@@ -9,6 +9,7 @@
 # 3. 执行 GRPO 训练
 # 4. 保存最终模型
 
+import sys
 import os
 import re
 import torch
@@ -30,7 +31,7 @@ MODEL_CANDIDATES = [
 ]
 
 DATASET_PATH = "./data"
-OUTPUT_DIR = "outputs_grpo_v2"
+OUTPUT_DIR = "outputs_grpo" # 恢复为原来的 outputs_grpo
 MAX_PROMPT_LENGTH = 1024  # 增加长度以容纳图像 tokens
 MAX_COMPLETION_LENGTH = 512
 
@@ -43,19 +44,36 @@ def get_model_path():
 def main():
     print("Starting Improved Medical VLM GRPO Training...")
     
-    # 1. 模型加载
-    model_name = get_model_path()
-    print(f" Loading model from: {model_name}")
+    # 1. 模型加载 - 尝试多个路径
+    model = None
+    tokenizer = None
     
-    try:
-        model, tokenizer = FastVisionModel.from_pretrained(
-            model_name=model_name,
-            load_in_4bit=True,
-            device_map="auto",
-            use_gradient_checkpointing="unsloth",
-        )
-    except Exception as e:
-        print(f" Failed to load model: {e}")
+    for model_name in MODEL_CANDIDATES:
+        # 如果是本地路径且不存在，跳过
+        if not model_name.startswith("unsloth/") and not os.path.exists(model_name):
+            continue
+            
+        print(f"📦 Attempting to load model from: {model_name}")
+        print("⏳ Loading model weights... (This may take 1-2 minutes)")
+        try:
+            # 检查是否为本地路径，如果是则强制 local_files_only 以避免网络卡顿
+            is_local = os.path.exists(model_name)
+            
+            model, tokenizer = FastVisionModel.from_pretrained(
+                model_name=model_name,
+                load_in_4bit=True,
+                device_map="auto",
+                use_gradient_checkpointing="unsloth",
+                local_files_only=is_local, # 恢复此参数以加快本地加载
+            )
+            print(f"✅ Successfully loaded: {model_name}")
+            break
+        except Exception as e:
+            print(f"⚠️ Failed to load {model_name}: {e}")
+            continue
+    
+    if model is None:
+        print("❌ All model candidates failed to load. Exiting.")
         return
 
     # 2. LoRA 配置
@@ -122,9 +140,12 @@ Write your final diagnostic conclusion here.
 
     # 处理数据集
     original_len = len(dataset)
+    # 1. 先过滤掉没有图片的样本
+    dataset = dataset.filter(lambda x: x.get('image') is not None)
+    
+    # 2. 格式化
     dataset = dataset.map(format_data, remove_columns=dataset.column_names, num_proc=4)
-    dataset = dataset.filter(lambda x: x is not None) # 过滤无效数据
-    print(f" Dataset loaded. Samples: {len(dataset)} (Original: {original_len})")
+    print(f"✅ Dataset loaded. Samples: {len(dataset)} (Original: {original_len})")
 
     # 4. 奖励函数定义
     
@@ -198,7 +219,7 @@ Write your final diagnostic conclusion here.
     # 5. 训练参数
     training_args = GRPOConfig(
         output_dir=OUTPUT_DIR,
-        run_name="grpo_medical_vlm_v2",
+        run_name="grpo_medical_vlm",
         learning_rate=2e-6,           # 保守的学习率
         adam_beta1=0.9,
         adam_beta2=0.99,
@@ -234,7 +255,7 @@ Write your final diagnostic conclusion here.
     trainer.train()
     
     # 8. 保存结果
-    final_output_dir = "grpo_model_v2"
+    final_output_dir = "grpo_model"
     print(f"Saving final model to {final_output_dir}...")
     model.save_pretrained(final_output_dir)
     tokenizer.save_pretrained(final_output_dir)
