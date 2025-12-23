@@ -80,13 +80,11 @@ def main():
     # 定义系统提示词，强制要求特定的输出格式
     SYSTEM_PROMPT = """
     你是一名专业的放射科医生。请分析给定的医疗图像。
-    请严格按照以下格式输出你的诊断结果：
+    请严格按照以下格式输出你的诊断结果，并且只输出这两个标签的内容：
     
     <reasoning>
     在这里写下你的观察过程、推理逻辑和分析细节。
-    例如：观察到了什么异常密度？边缘是否清晰？位置在哪里？
     </reasoning>
-    
     <answer>
     在这里给出最终的诊断结论。
     </answer>
@@ -135,16 +133,19 @@ def main():
     # 目标是控制冗余，超过目标长度才扣分
     def length_penalty_reward(completions, **kwargs):
         rewards = []
-        target_length = 500 # 假设我们期望的推理长度在 500 字符左右
+        target_length = 300 # 降低目标长度，鼓励简洁
         for completion in completions:
             text = completion[0]["content"] if isinstance(completion, list) else completion
             reasoning_match = re.search(r"<reasoning>(.*?)</reasoning>", text, re.DOTALL)
             if reasoning_match:
                 reasoning_text = reasoning_match.group(1)
                 length = len(reasoning_text)
-                # 如果长度超过 target_length，每超 10 个字符扣 0.01 分
-                penalty = max(0, (length - target_length) / 10.0 * 0.01)
-                rewards.append(-penalty)
+                # 软惩罚：超过 target_length 后，惩罚力度稍微加大，但不要太狠，避免模型不敢说话
+                if length > target_length:
+                     penalty = (length - target_length) / 50.0 * 0.1 # 每超50字扣0.1分
+                     rewards.append(-min(penalty, 1.0)) # 最多扣1分
+                else:
+                     rewards.append(0.0)
             else:
                 rewards.append(0.0)
         return rewards
@@ -174,30 +175,49 @@ def main():
         rewards = []
         for completion, ref_answer in zip(completions, ground_truth):
             text = completion[0]["content"] if isinstance(completion, list) else completion
+            # 尝试提取 <answer> 内容
             answer_match = re.search(r"<answer>(.*?)</answer>", text, re.DOTALL)
+            
+            # 提取预测文本：如果有标签取标签内，否则取最后一段，再否则取全文
             if answer_match:
-                pred_answer = answer_match.group(1).lower()
-                
-                # 简单的实体抽取逻辑 (实际可用 spaCy 或医学实体库)
-                # 这里我们假设参考答案中的名词/形容词是关键实体
-                # 简单起见，我们按空格分词，并过滤掉停用词
-                stop_words = {"the", "is", "a", "an", "of", "in", "on", "at", "and", "with", "to", "for"}
-                ref_tokens = set([w for w in ref_answer.lower().split() if w not in stop_words and len(w) > 2])
-                pred_tokens = set([w for w in pred_answer.split() if w not in stop_words and len(w) > 2])
-                
-                if not ref_tokens:
-                    rewards.append(0.0)
-                    continue
-                
-                # 计算 Recall (覆盖率) 作为准确率的核心指标
-                # 医疗场景下，漏诊 (False Negative) 代价大，所以关注 Recall
-                intersection = ref_tokens.intersection(pred_tokens)
-                recall = len(intersection) / len(ref_tokens)
-                
-                # 给予较高的权重 (例如 2.0)，使其成为主导奖励
-                rewards.append(recall * 2.0)
+                pred_answer = answer_match.group(1).lower().strip()
+            elif "<answer>" in text:
+                pred_answer = text.split("<answer>")[-1].lower().strip()
             else:
-                rewards.append(0.0)
+                pred_answer = text.lower().strip()
+            
+            # 预处理：移除标点符号，只保留字母数字和空格
+            pred_clean = re.sub(r'[^\w\s]', ' ', pred_answer)
+            ref_clean = re.sub(r'[^\w\s]', ' ', ref_answer.lower())
+            
+            # 分词并过滤停用词
+            stop_words = {"the", "is", "a", "an", "of", "in", "on", "at", "and", "with", "to", "for", "it", "this", "that"}
+            ref_tokens = set([w for w in ref_clean.split() if w not in stop_words and len(w) > 2])
+            pred_tokens = set([w for w in pred_clean.split() if w not in stop_words and len(w) > 2])
+            
+            if not ref_tokens:
+                rewards.append(0.5) # 如果参考答案为空或全是停用词，给个中间分
+                continue
+            
+            # 计算 Recall (覆盖率)
+            intersection = ref_tokens.intersection(pred_tokens)
+            recall = len(intersection) / len(ref_tokens)
+            
+            # 奖励设计：
+            # 1. 基础分：只要有重叠就给分
+            # 2. 阶梯奖励：覆盖率越高，奖励指数级上升
+            if recall == 0:
+                score = 0.0
+            elif recall < 0.3:
+                score = 0.5
+            elif recall < 0.6:
+                score = 1.0
+            elif recall < 0.9:
+                score = 1.5
+            else:
+                score = 2.0
+                
+            rewards.append(score)
         return rewards
 
     # =================================================================
@@ -219,7 +239,7 @@ def main():
         gradient_accumulation_steps=4,
         num_generations=4,           # 每个 prompt 生成多少个样本用于对比 (Group Size)
         max_prompt_length=512,
-        max_completion_length=512,   # 允许生成的最大长度
+        max_completion_length=384,   # 允许生成的最大长度，从 512 降低到 384 以减少截断概率
         max_steps=50,                # 演示用
         save_steps=10,
         report_to="none",
